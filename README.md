@@ -6,18 +6,20 @@ Backend: Flask (Python) with heuristic optimization (greedy search, Bat Algorith
 
 Frontend: HTML + Tailwind CSS + Kakao Maps API for map rendering and stop selection
 
-Features:
 
-Fixed destination with selectable start point
+🚌Features:
 
-Demand simulation with peak/off-peak adjustments
+1. Fixed destination with selectable start point
 
-Route fitness evaluation based on demand, efficiency, and coverage
+2. Demand simulation with peak/off-peak adjustments
 
-Optional mandatory stops selection directly from the map
+3. Route fitness evaluation based on demand, efficiency, and coverage
 
-Kakao Mobility API integration for detailed route paths
+4. Optional mandatory stops selection directly from the map
 
-Multiple optimized route options with ETA, passenger counts, and demand stats
+5. Kakao Mobility API integration for detailed route paths
+
+6. Multiple optimized route options with ETA, passenger counts, and demand stats
+
 
 🚀 Designed for urban transit planners and logistics teams to streamline route planning and capacity management.
