@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>버스 노선 최적화 장치</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MODIFIED: &libraries=services is no longer needed by the frontend -->
+  <script type="text/javascript" src="//dapi.kakao.com/v2/maps/sdk.js?appkey=YOUR_API_KEY&libraries=clusterer,drawing"></script>
+  <style>
+    .main-panel { height: 85vh; display: flex; flex-direction: column; }
+    #map { width: 100%; flex-grow: 1; }
+    #time-slider-value { font-weight: 700; color: #16a34a; }
+    .loader {
+        border: 5px solid #f3f3f3; border-radius: 50%; border-top: 5px solid #3498db;
+        width: 50px; height: 50px; animation: spin 1s linear infinite;
+        position: absolute; top: 50%; left: 50%; z-index: 1000;
+        margin-left: -25px; margin-top: -25px; display: none;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .station-marker-content {
+        background-color: rgba(255, 255, 255, 0.9); border: 2px solid #666;
+        border-radius: 50%; color: #333; font-weight: bold; text-align: center;
+        line-height: 20px; font-size: 12px; width: 24px; height: 24px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2); cursor: pointer;
+    }
+    .source-marker { border-color: #3cb44b; color: #3cb44b; }
+    .dest-marker { border-color: #e6194b; color: #e6194b; }
+    .route-details ul { list-style-type: none; padding-left: 20px; margin-top: 8px; border-left: 2px solid #ddd; }
+    .route-details li { margin-bottom: 5px; position: relative; padding: 4px; border-radius: 4px; }
+    .route-details li:hover { background-color: #f0f0f0; }
+  </style>
+</head>
+<body class="bg-gray-100">
+<div class="px-4 sm:px-6 lg:px-8 py-8">
+  <h1 class="text-3xl font-bold text-center mb-6">버스 노선 최적화 장치</h1>
+
+  <!-- User Controls Panel -->
+  <div class="bg-white p-4 rounded-lg shadow-md mb-6">
+    <div class="flex flex-wrap items-end gap-x-6 gap-y-4">
+        <div>
+            <label for="start-point" class="block text-sm font-medium text-gray-700">원천</label>
+            <select id="start-point" class="w-48 p-2 border border-gray-300 rounded">
+              {% for stop in all_stops %}
+                  <option value="{{ stop.name }}">{{ stop.name }}</option>
+              {% endfor %}
+          </select>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700">목적지(고정)</label>
+            <!-- MODIFIED: Destination name is now dynamic -->
+            <p class="mt-1 p-2 font-semibold text-gray-800 bg-gray-100 rounded border border-gray-200">{{ destination_name }}</p>
+        </div>
+        <div>
+            <label for="time-slider" class="block text-sm font-medium text-gray-700">
+                시간: <span id="time-slider-value">오전 09:00</span>
+            </label>
+            <input type="range" id="time-slider" min="360" max="1320" value="540" step="15" class="w-48 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" />
+        </div>
+        <div>
+            <label for="max-time" class="block text-sm font-medium text-gray-700">최대 이동 시간(분)</label>
+            <input type="number" id="max-time" value="90" min="10" max="300" class="w-32 p-2 border border-gray-300 rounded">
+        </div>
+        <div>
+            <label for="vehicle-capacity" class="block text-sm font-medium text-gray-700">차량 용량</label>
+            <input type="number" id="vehicle-capacity" value="40" min="10" max="100" class="w-32 p-2 border border-gray-300 rounded">
+        </div>
+        <button id="find-route-btn" class="bg-blue-600 text-white font-bold py-2 px-4 rounded hover:bg-blue-700">최적의 경로 찾기</button>
+        <!-- MODIFIED: Added button to clear stop selections -->
+        <button id="clear-selections-btn" class="bg-gray-500 text-white font-bold py-2 px-4 rounded hover:bg-gray-600">선택한 정류장 지우기</button>
+    </div>
+    <!-- MODIFIED: Added instructional text -->
+    <p class="text-xs text-gray-500 mt-2">팁: 지도에서 정류장을 클릭하여 경로에 포함할 필수 경유지를 선택하세요.</p>
+  </div>
+  
+  <!-- Main Content Grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <div class="lg:col-span-8 bg-white p-4 rounded-lg shadow-md relative main-panel">
+      <div id="loader" class="loader"></div>
+      <div id="map"></div>
+    </div>
+    <div class="lg:col-span-4 bg-white p-4 rounded-lg shadow-md main-panel">
+        <h2 class="text-xl font-semibold mb-3 border-b pb-2 flex-shrink-0">최적화된 경로 옵션</h2>
+        <div id="route-details-container" class="text-sm flex-grow min-h-0 overflow-y-auto bg-gray-50 p-1 space-y-4">
+            <p class="p-2 text-gray-500">출처를 선택하고 "최적의 경로 찾기"를 클릭하세요</p>
+        </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const loader = document.getElementById('loader');
+  let map;
+  let mapOverlays = [], allRoutePolylines = [];
+  let infoWindow = null;
+  let lastApiResult = null;
+  const ROUTE_COLORS = ['#4363d8', '#e6194b', '#3cb44b', '#f58231', '#911eb4', '#469990'];
+  // MODIFIED: Destination name is now passed from the template
+  const FIXED_DESTINATION_NAME_JS = "{{ destination_name }}";
+
+
+  // --- MODIFIED: Added state management for selected stops and marker images ---
+  let selectedStopIds = new Set();
+  let allStopMarkersById = {}; // To store marker objects by ID
+  let normalMarkerImage, selectedMarkerImage;
+  // --------------------------------------------------------------------------
+
+  // MODIFIED: This function now makes markers interactive for selection.
+  function displayAllStops(stopsData) {
+    stopsData.forEach(stop => {
+        const position = new kakao.maps.LatLng(stop.lat, stop.lng);
+
+        const marker = new kakao.maps.Marker({
+            position: position,
+            image: normalMarkerImage, // Use the global normal image
+            title: stop.name
+        });
+
+        allStopMarkersById[stop.id] = marker; // Store marker by ID for easy access
+
+        // Click listener to select/deselect a stop
+        kakao.maps.event.addListener(marker, 'click', function() {
+            // MODIFIED: Do not allow selecting the fixed destination using the dynamic name
+            if (stop.name === FIXED_DESTINATION_NAME_JS) return;
+
+            if (selectedStopIds.has(stop.id)) {
+                selectedStopIds.delete(stop.id);
+                marker.setImage(normalMarkerImage);
+            } else {
+                selectedStopIds.add(stop.id);
+                marker.setImage(selectedMarkerImage);
+            }
+        });
+
+        kakao.maps.event.addListener(marker, 'mouseover', function() {
+           const content = `<div style="padding:5px;font-size:12px;min-width:120px;"><strong>${stop.name}</strong><br><span style="color: #666;">의무화하려면 클릭하세요</span></div>`;
+           infoWindow.setContent(content);
+           infoWindow.setPosition(position);
+           infoWindow.open(map);
+        });
+
+        kakao.maps.event.addListener(marker, 'mouseout', function() { infoWindow.close(); });
+
+        marker.setMap(map);
+    });
+  }
+  
+  // MODIFIED: New function to clear all selected stops
+  function clearStopSelections() {
+      selectedStopIds.forEach(stopId => {
+          const marker = allStopMarkersById[stopId];
+          if (marker) {
+              marker.setImage(normalMarkerImage);
+          }
+      });
+      selectedStopIds.clear();
+      console.log("Cleared all stop selections.");
+  }
+
+
+  async function initMap() {
+    const mapContainer = document.getElementById('map');
+    const mapOption = { center: new kakao.maps.LatLng(37.58, 127.08), level: 8 };
+    map = new kakao.maps.Map(mapContainer, mapOption);
+    infoWindow = new kakao.maps.InfoWindow({ removable: true });
+    
+    // --- MODIFIED: Initialize marker images ---
+    normalMarkerImage = new kakao.maps.MarkerImage('https://t1.daumcdn.net/mapjsapi/images/marker.png', new kakao.maps.Size(30, 35), {offset: new kakao.maps.Point(15, 35)});
+    // A blue star marker is a good visual indicator for "selected"
+    selectedMarkerImage = new kakao.maps.MarkerImage('https://t1.daumcdn.net/localimg/localimages/07/mapapidoc/markerStar.png', new kakao.maps.Size(24, 35), {offset: new kakao.maps.Point(12, 35)});
+    // ----------------------------------------
+
+    try {
+        const response = await fetch('/api/all-stops');
+        if (!response.ok) throw new Error('Failed to fetch stop data');
+        const allStopsData = await response.json();
+        displayAllStops(allStopsData);
+    } catch (error) {
+        console.error("Could not load initial stop locations:", error);
+    }
+
+    document.getElementById('find-route-btn').addEventListener('click', findBestRoute);
+    document.getElementById('time-slider').addEventListener('input', updateSliderValue);
+    // MODIFIED: Add listener for the new clear button
+    document.getElementById('clear-selections-btn').addEventListener('click', clearStopSelections);
+    document.getElementById('start-point').value = '미금역 3번 출구';
+    updateSliderValue();
+  }
+  document.addEventListener('DOMContentLoaded', () => { kakao.maps.load(initMap); });
+
+  function formatTimeFromMinutes(totalMinutes) {
+      const h_24 = Math.floor(totalMinutes / 60);
+      const m = Math.round(totalMinutes % 60);
+      const ampm_ko = h_24 < 12 ? '오전' : '오후';
+      let h_12 = h_24 % 12;
+      if (h_12 === 0) h_12 = 12;
+      return `${ampm_ko} ${String(h_12).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  function updateSliderValue() {
+    const slider = document.getElementById('time-slider');
+    const display = document.getElementById('time-slider-value');
+    display.textContent = formatTimeFromMinutes(+slider.value);
+  }
+
+  function clearMap() {
+    mapOverlays.forEach(m => m.setMap(null));
+    mapOverlays = [];
+    allRoutePolylines.forEach(p => p.setMap(null));
+    allRoutePolylines = [];
+    if (infoWindow) infoWindow.close();
+  }
+
+  function displayRouteFocus(route, routeIndex) {
+    mapOverlays.forEach(m => m.setMap(null));
+    mapOverlays = [];
+    infoWindow.close();
+
+    allRoutePolylines.forEach((polyline, index) => {
+        if (index === routeIndex) {
+            polyline.setOptions({ strokeWeight: 8, strokeOpacity: 0.9, zIndex: 2 });
+        } else {
+            polyline.setOptions({ strokeWeight: 5, strokeOpacity: 0.5, zIndex: 1 });
+        }
+    });
+
+    if (!route || !route.stops) return;
+    route.stops.forEach(stop => {
+        const sourceId = route.stops[0].id;
+        const destId = route.stops[route.stops.length - 1].id;
+        let markerClass = '';
+        if (stop.id === sourceId) markerClass = 'source-marker';
+        else if (stop.id === destId) markerClass = 'dest-marker';
+
+        const markerContent = document.createElement('div');
+        markerContent.className = `station-marker-content ${markerClass}`;
+        markerContent.textContent = stop.id;
+        const position = new kakao.maps.LatLng(stop.lat, stop.lng);
+
+        markerContent.addEventListener('click', () => {
+          const infoContent = `<div style="padding:7px;font-size:12px;min-width:150px;"><strong style="font-size:14px;">[${stop.id}]${stop.name}</strong><br>ETA: <strong>${stop.eta}</strong><br>요청: ${stop.demand}<br>탑승한: ${stop.passengers_onboard}</div>`;
+          infoWindow.setContent(infoContent);
+          infoWindow.setPosition(position);
+          infoWindow.open(map);
+        });
+
+        const customOverlay = new kakao.maps.CustomOverlay({ position, content: markerContent, yAnchor: 1, zIndex: 3 });
+        customOverlay.setMap(map);
+        mapOverlays.push(customOverlay);
+    });
+  }
+
+  async function findBestRoute() {
+    clearMap();
+    const start = document.getElementById('start-point').value;
+    const detailsDiv = document.getElementById('route-details-container');
+
+    if (!start) { detailsDiv.innerHTML = `<p class="p-2 text-red-500">Please select a source.</p>`; return; }
+    // MODIFIED: Use dynamic destination name for check
+    if (start === FIXED_DESTINATION_NAME_JS) { detailsDiv.innerHTML = `<p class="p-2 text-red-500">Source cannot be the same as the fixed destination.</p>`; return; }
+
+    loader.style.display = 'block';
+    detailsDiv.innerHTML = '';
+    
+    try {
+        const timeSlider = document.getElementById('time-slider');
+        const mins = +timeSlider.value;
+        const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+        const mm = String(mins % 60).padStart(2, '0');
+        // MODIFIED: Add the list of selected stop IDs to the payload
+        const payload = {
+            start: start, start_time: `${hh}:${mm}`,
+            max_journey_time: +document.getElementById('max-time').value,
+            vehicle_capacity: +document.getElementById('vehicle-capacity').value,
+            mandatory_stops: Array.from(selectedStopIds) // Send selected IDs
+        };
+        const res = await fetch('/api/find-best-route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error(`API request failed with status ${res.status}`);
+        const data = await res.json();
+        
+        if (data.error) { detailsDiv.innerHTML = `<p class="text-red-700 p-2 font-semibold">${data.error}</p>`; return; }
+        
+        lastApiResult = data;
+        const routes = data.routes;
+        if (!routes || routes.length === 0) { detailsDiv.innerHTML = `<p class="p-2 text-gray-500">경로를 찾을 수 없습니다.</p>`; return; }
+        
+        const bounds = new kakao.maps.LatLngBounds();
+        let detailsHTML = '';
+
+        routes.forEach((route, index) => {
+            const color = ROUTE_COLORS[index % ROUTE_COLORS.length];
+            const isBest = index === 0 ? '(Best)' : '';
+
+            if (route.detailed_path && route.detailed_path.length > 0) {
+                const linePath = route.detailed_path.map(coords => {
+                    const latlng = new kakao.maps.LatLng(coords[0], coords[1]);
+                    bounds.extend(latlng);
+                    return latlng;
+                });
+                const polyline = new kakao.maps.Polyline({
+                    path: linePath, strokeWeight: 5, strokeColor: color,
+                    strokeOpacity: 0.6, strokeStyle: 'solid', zIndex: 1
+                });
+                polyline.setMap(map);
+                allRoutePolylines.push(polyline);
+            }
+
+            detailsHTML += `<div class="route-details p-3 rounded-md border bg-white shadow-sm"><div class="flex justify-between items-center"><div class="flex items-center"><div style="background-color: ${color};" class="w-4 h-4 rounded-full mr-3 flex-shrink-0"></div><h4 class="font-bold text-lg">경로 ${index + 1} ${isBest}</h4></div><button data-route-index="${index}" class="show-map-btn bg-indigo-600 text-white text-xs font-bold py-1 px-3 rounded hover:bg-indigo-700">지도에 집중하기</button></div><div class="mt-2 text-xs grid grid-cols-2 gap-x-2"><p><strong>제공된 수요:</strong> <span class="font-bold text-green-600">${route.total_demand}</span></p><p><strong>여행 시간:</strong> <span class="font-bold text-blue-600">${route.total_time} min</span></p></div><h5 class="font-semibold mt-3 mb-1">일정:</h5><ul>`;
+            route.stops.forEach(stop => {
+                detailsHTML += `<li><span class="font-mono font-bold text-gray-700">[${stop.eta}]</span><span class="font-semibold">[${stop.id}] ${stop.name}</span><div class="text-xs text-gray-500 pl-14">요청: ${stop.demand} | 탑승한: ${stop.passengers_onboard}</div></li>`;
+            });
+            detailsHTML += `</ul></div>`;
+        });
+        detailsDiv.innerHTML = detailsHTML;
+
+        if (!bounds.isEmpty()) { map.setBounds(bounds); }
+
+        if (routes.length > 0) {
+            displayRouteFocus(routes[0], 0);
+        }
+
+        document.querySelectorAll('.show-map-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const routeIndex = parseInt(e.target.dataset.routeIndex, 10);
+                if (lastApiResult && lastApiResult.routes[routeIndex]) {
+                    displayRouteFocus(lastApiResult.routes[routeIndex], routeIndex);
+                }
+            });
+        });
+
+    } catch(e) {
+        console.error("Failed to find or display route:", e);
+        detailsDiv.innerHTML = `<p class="text-red-500 p-2">An error occurred. See browser console.</p>`;
+    } finally {
+        loader.style.display = 'none';
+    }
+  }
+</script>
+</body>
+</html>
